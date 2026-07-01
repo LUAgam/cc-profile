@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+legacy_config_dir="${CLAUDE_CODE_CONFIG_DIR:-$HOME/.config/claude-code}"
+if [ -n "${CC_CONFIG_DIR:-}" ]; then
+  config_dir="$CC_CONFIG_DIR"
+elif [ -d "$HOME/.config/cc-profiles" ]; then
+  config_dir="$HOME/.config/cc-profiles"
+else
+  config_dir="$legacy_config_dir"
+fi
+profile_dir="${CC_PROFILE_DIR:-${CLAUDE_CODE_PROFILE_DIR:-$config_dir/profiles}}"
+default_profile_file="$config_dir/default-profile"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ccrun [profile] <command> [args...]
+  ccrun --profile <profile> <command> [args...]
+  ccrun --no-profile <command> [args...]
+  ccrun --print-env [profile]
+
+Examples:
+  ccrun runapi claude
+  ccrun runapi claude -p 'hello'
+  ccrun claude --version
+  ccrun --profile runapi python script.py
+USAGE
+}
+
+profile_name_is_valid() {
+  case "$1" in
+    ""|*/*|*..*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+current_profile() {
+  if [ -f "$default_profile_file" ]; then
+    sed -n '1p' "$default_profile_file" | tr -d '[:space:]'
+  fi
+}
+
+strip_outer_quotes() {
+  local value="$1"
+  case "$value" in
+    \"*\")
+      value="${value#\"}"
+      value="${value%\"}"
+      ;;
+    \'*\')
+      value="${value#\'}"
+      value="${value%\'}"
+      ;;
+  esac
+  printf '%s' "$value"
+}
+
+load_profile_file() {
+  local file="$1"
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -z "$line" ] && continue
+    case "$line" in
+      \#*) continue ;;
+      export\ *) line="${line#export }" ;;
+    esac
+    case "$line" in
+      *=*) ;;
+      *)
+        echo "Invalid profile line in $file: $line" >&2
+        exit 2
+        ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    if ! [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "Invalid env var name in $file: $key" >&2
+      exit 2
+    fi
+    value="$(strip_outer_quotes "$value")"
+    export "$key=$value"
+  done < "$file"
+}
+
+print_profile_file() {
+  local file="$1"
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -z "$line" ] && continue
+    case "$line" in
+      \#*) continue ;;
+      export\ *) line="${line#export }" ;;
+    esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      value="$(strip_outer_quotes "$value")"
+      printf 'export %s=%q\n' "$key" "$value"
+    fi
+  done < "$file"
+}
+
+profile=""
+no_profile=0
+print_env=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p|--profile)
+      [ "$#" -ge 2 ] || { echo "Missing profile name" >&2; exit 2; }
+      profile="$2"
+      shift 2
+      ;;
+    --no-profile)
+      no_profile=1
+      shift
+      ;;
+    --print-env|--env)
+      print_env=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$no_profile" = 1 ] && [ -n "$profile" ]; then
+  echo "--profile and --no-profile cannot be used together" >&2
+  exit 2
+fi
+
+if [ "$no_profile" = 0 ] && [ -z "$profile" ]; then
+  if [ "$#" -ge 1 ] && profile_name_is_valid "$1" && [ -f "$profile_dir/$1.env" ] && { [ "$print_env" = 1 ] || [ "$#" -ge 2 ]; }; then
+    profile="$1"
+    shift
+  else
+    profile="${CC_PROFILE:-${CLAUDE_CODE_PROFILE:-$(current_profile)}}"
+  fi
+fi
+
+profile_file=""
+if [ "$no_profile" = 0 ] && [ -n "$profile" ]; then
+  if ! profile_name_is_valid "$profile"; then
+    echo "Invalid profile name: $profile" >&2
+    exit 2
+  fi
+  profile_file="$profile_dir/$profile.env"
+  if [ ! -f "$profile_file" ]; then
+    echo "Profile not found: $profile_file" >&2
+    exit 2
+  fi
+  if [ "$print_env" = 1 ]; then
+    print_profile_file "$profile_file"
+    exit 0
+  fi
+  load_profile_file "$profile_file"
+fi
+
+if [ "$print_env" = 1 ]; then
+  exit 0
+fi
+
+if [ "$#" -eq 0 ]; then
+  echo "Missing command" >&2
+  usage >&2
+  exit 2
+fi
+
+exec "$@"
