@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image="${CLAUDE_CODE_DOCKER_IMAGE:-claude-code:node20}"
+workspace="${CLAUDE_CODE_WORKSPACE:-$PWD}"
+uid="$(id -u)"
+gid="$(id -g)"
+legacy_config_dir="${CLAUDE_CODE_CONFIG_DIR:-$HOME/.config/claude-code}"
+if [ -n "${CC_CONFIG_DIR:-}" ]; then
+  config_dir="$CC_CONFIG_DIR"
+elif [ -d "$HOME/.config/cc-profiles" ]; then
+  config_dir="$HOME/.config/cc-profiles"
+else
+  config_dir="$legacy_config_dir"
+fi
+profile_dir="${CC_PROFILE_DIR:-${CLAUDE_CODE_PROFILE_DIR:-$config_dir/profiles}}"
+default_profile_file="$config_dir/default-profile"
+profile="${CC_PROFILE:-${CLAUDE_CODE_PROFILE:-}}"
+
+mkdir -p "$HOME/.claude"
+if [ ! -f "$HOME/.claude.json" ]; then
+  printf '{}\n' > "$HOME/.claude.json"
+fi
+chmod 600 "$HOME/.claude.json"
+
+if [ -z "$profile" ] && [ -f "$default_profile_file" ]; then
+  profile="$(sed -n '1p' "$default_profile_file" | tr -d '[:space:]')"
+fi
+
+profile_file=""
+if [ -n "$profile" ]; then
+  case "$profile" in
+    ""|*/*|*..*)
+      echo "Invalid profile name: $profile" >&2
+      exit 2
+      ;;
+  esac
+  profile_file="$profile_dir/$profile.env"
+  if [ ! -f "$profile_file" ]; then
+    echo "Profile not found: $profile_file" >&2
+    echo "Create it or choose another profile with: ccprofile list" >&2
+    exit 2
+  fi
+fi
+
+docker_args=(
+  run
+  --rm
+  --network host
+  -v "$workspace:/workspace"
+  -w /workspace
+)
+
+if [ -n "$profile_file" ]; then
+  docker_args+=(--env-file "$profile_file")
+fi
+
+add_env_if_set() {
+  local name="$1"
+  if [ "${!name+x}" = x ]; then
+    docker_args+=(-e "$name")
+  fi
+}
+
+for env_name in \
+  TERM COLORTERM \
+  HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy \
+  ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL \
+  ANTHROPIC_CUSTOM_MODEL_OPTION ANTHROPIC_CUSTOM_MODEL_OPTION_NAME ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION \
+  API_TIMEOUT_MS API_FORCE_IDLE_TIMEOUT; do
+  add_env_if_set "$env_name"
+done
+
+if [ -t 0 ] && [ -t 1 ]; then
+  docker_args+=(-it)
+fi
+
+if [ "$uid" = "0" ]; then
+  container_home="/root"
+else
+  container_home="/home/claude"
+  docker_args+=(--user "$uid:$gid")
+fi
+
+docker_args+=(
+  -e "HOME=$container_home"
+  -v "$HOME/.claude:$container_home/.claude"
+  -v "$HOME/.claude.json:$container_home/.claude.json"
+)
+
+if [ -f "$HOME/.gitconfig" ]; then
+  docker_args+=(-v "$HOME/.gitconfig:$container_home/.gitconfig:ro")
+fi
+
+if [ -d "$HOME/.ssh" ]; then
+  docker_args+=(-v "$HOME/.ssh:$container_home/.ssh:ro")
+fi
+
+exec docker "${docker_args[@]}" "$image" "$@"
