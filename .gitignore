@@ -1,0 +1,12 @@
+.DS_Store
+*.swp
+*.tmp
+*.log
+
+# Real profile files often contain secrets. Commit .example.env files only.
+profiles/*.env
+*.local.env
+.env
+.env.*
+!.env.example
+!*.example.env
