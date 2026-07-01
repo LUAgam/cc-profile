@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+legacy_config_dir="${CLAUDE_CODE_CONFIG_DIR:-$HOME/.config/claude-code}"
+if [ -n "${CC_CONFIG_DIR:-}" ]; then
+  config_dir="$CC_CONFIG_DIR"
+elif [ -d "$HOME/.config/cc-profiles" ]; then
+  config_dir="$HOME/.config/cc-profiles"
+else
+  config_dir="$legacy_config_dir"
+fi
+profile_dir="${CC_PROFILE_DIR:-${CLAUDE_CODE_PROFILE_DIR:-$config_dir/profiles}}"
+default_profile_file="$config_dir/default-profile"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ccprofile list
+  ccprofile current
+  ccprofile use <name>
+  ccprofile show [name]
+  ccprofile edit <name>
+  ccprofile path
+
+Run with a profile once:
+  ccrun <name> claude
+  CC_PROFILE=<name> claude
+USAGE
+}
+
+profile_name_is_valid() {
+  case "$1" in
+    ""|*/*|*..*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+mask_line() {
+  sed -E \
+    -e 's/^((ANTHROPIC|OPENAI|GEMINI|GOOGLE|AZURE|AWS|COHERE|MISTRAL|GROQ|DEEPSEEK|XAI|OPENROUTER)[A-Z0-9_]*(API_KEY|AUTH_TOKEN|TOKEN|SECRET|PASSWORD)=).{8}.*(.{6})$/\1********\4/' \
+    -e 's/^([A-Za-z_][A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)=).{8}.*(.{6})$/\1********\3/'
+}
+
+current_profile() {
+  if [ -f "$default_profile_file" ]; then
+    sed -n '1p' "$default_profile_file" | tr -d '[:space:]'
+  fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  list)
+    mkdir -p "$profile_dir"
+    current="$(current_profile)"
+    found=0
+    for file in "$profile_dir"/*.env; do
+      [ -e "$file" ] || continue
+      found=1
+      name="$(basename "$file" .env)"
+      if [ "$name" = "$current" ]; then
+        printf '* %s\n' "$name"
+      else
+        printf '  %s\n' "$name"
+      fi
+    done
+    if [ "$found" = 0 ]; then
+      echo "No profiles in $profile_dir"
+    fi
+    ;;
+  current)
+    current="$(current_profile)"
+    if [ -n "$current" ]; then
+      echo "$current"
+    else
+      echo "No default profile set"
+    fi
+    ;;
+  use)
+    name="${2:-}"
+    if [ -z "$name" ]; then
+      echo "Missing profile name" >&2
+      usage >&2
+      exit 2
+    fi
+    if ! profile_name_is_valid "$name"; then
+      echo "Invalid profile name: $name" >&2
+      exit 2
+    fi
+    if [ ! -f "$profile_dir/$name.env" ]; then
+      echo "Profile not found: $profile_dir/$name.env" >&2
+      exit 2
+    fi
+    mkdir -p "$config_dir"
+    printf '%s\n' "$name" > "$default_profile_file"
+    chmod 600 "$default_profile_file"
+    echo "Default profile: $name"
+    ;;
+  show)
+    name="${2:-$(current_profile)}"
+    if [ -z "$name" ]; then
+      echo "No profile specified and no default profile set" >&2
+      exit 2
+    fi
+    if ! profile_name_is_valid "$name"; then
+      echo "Invalid profile name: $name" >&2
+      exit 2
+    fi
+    file="$profile_dir/$name.env"
+    if [ ! -f "$file" ]; then
+      echo "Profile not found: $file" >&2
+      exit 2
+    fi
+    mask_line < "$file"
+    ;;
+  edit)
+    name="${2:-}"
+    if [ -z "$name" ]; then
+      echo "Missing profile name" >&2
+      usage >&2
+      exit 2
+    fi
+    if ! profile_name_is_valid "$name"; then
+      echo "Invalid profile name: $name" >&2
+      exit 2
+    fi
+    mkdir -p "$profile_dir"
+    chmod 700 "$config_dir" "$profile_dir" 2>/dev/null || true
+    file="$profile_dir/$name.env"
+    if [ ! -f "$file" ]; then
+      {
+        echo 'ANTHROPIC_BASE_URL='
+        echo 'ANTHROPIC_API_KEY='
+        echo 'ANTHROPIC_MODEL='
+      } > "$file"
+      chmod 600 "$file"
+    fi
+    "${EDITOR:-vi}" "$file"
+    chmod 600 "$file"
+    ;;
+  path)
+    echo "$profile_dir"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
